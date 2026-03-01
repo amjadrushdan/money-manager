@@ -22,14 +22,10 @@ import pdfplumber
 PARSERS = [PublicBankParser()]
 
 
-def _get_supabase(auth_header: str):
+def _get_supabase():
     url = os.environ['SUPABASE_URL']
     service_key = os.environ['SUPABASE_SERVICE_KEY']
-    client = create_client(url, service_key)
-    # Set the user JWT so RLS policies apply correctly
-    if auth_header and auth_header.startswith('Bearer '):
-        client.auth.set_session(auth_header[7:], '')
-    return client
+    return create_client(url, service_key)
 
 
 def _detect_parser(pdf_path: str):
@@ -84,7 +80,6 @@ def _deduplicate(supabase, account_id: str, transactions: list) -> list:
 class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
-        auth = self.headers.get('Authorization', '')
         content_type = self.headers.get('Content-Type', '')
 
         if 'multipart/form-data' not in content_type:
@@ -126,7 +121,7 @@ class handler(BaseHTTPRequestHandler):
 
             transactions = parser.parse(tmp_path)
 
-            supabase = _get_supabase(auth)
+            supabase = _get_supabase()
             account_id = _get_or_create_account(supabase, user_id, 'Public Bank')
             new_txs = _deduplicate(supabase, account_id, transactions)
 

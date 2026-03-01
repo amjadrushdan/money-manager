@@ -84,8 +84,18 @@ export default function Transactions() {
         body: formData,
       })
 
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error ?? 'Upload failed')
+      let json: { error?: string; inserted?: number; duplicates_skipped?: number; total_parsed?: number }
+      try {
+        json = await res.json()
+      } catch {
+        throw new Error(`Server error (${res.status}) — check Vercel function logs`)
+      }
+      if (!res.ok) {
+        if (res.status === 422) throw new Error('Unsupported format — only Public Bank credit card statements are supported')
+        if (res.status === 400) throw new Error(json.error ?? 'Bad request')
+        if (res.status === 500) throw new Error(`Parsing failed: ${json.error ?? 'unknown error'}`)
+        throw new Error(json.error ?? `Upload failed (${res.status})`)
+      }
 
       setUploadStatus(json)
       queryClient.invalidateQueries({ queryKey: ['transactions'] })
@@ -211,11 +221,16 @@ export default function Transactions() {
           )}
 
           {uploadError && (
-            <div className="rounded-lg border border-red-900 bg-zinc-900 px-4 py-3 flex items-center justify-between">
-              <p className="text-sm text-red-400">{uploadError}</p>
-              <button onClick={() => setUploadError('')}>
-                <X className="h-4 w-4 text-zinc-500" />
-              </button>
+            <div className="rounded-lg border border-red-900 bg-zinc-900 px-4 py-3 space-y-1">
+              <div className="flex items-start justify-between gap-2">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium text-red-400">Upload failed</p>
+                  <p className="text-xs text-zinc-400">{uploadError}</p>
+                </div>
+                <button onClick={() => setUploadError('')} className="mt-0.5 shrink-0">
+                  <X className="h-4 w-4 text-zinc-500" />
+                </button>
+              </div>
             </div>
           )}
 
