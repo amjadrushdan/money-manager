@@ -4,12 +4,10 @@ POST /api/parse_pdf
 Accepts multipart PDF upload, parses transactions, inserts into Supabase.
 """
 
-import cgi
 import json
 import os
 import sys
 import tempfile
-from http.server import BaseHTTPRequestHandler
 
 # Allow importing from parsers/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -37,8 +35,8 @@ def _detect_parser(pdf_path: str):
     return None
 
 
-def _get_or_create_account(supabase, user_id: str, bank_name: str) -> str:
-    result = supabase.table('accounts') \
+def _get_or_create_account(sb, user_id: str, bank_name: str) -> str:
+    result = sb.table('accounts') \
         .select('id') \
         .eq('user_id', user_id) \
         .eq('bank_name', bank_name) \
@@ -48,7 +46,7 @@ def _get_or_create_account(supabase, user_id: str, bank_name: str) -> str:
     if result.data:
         return result.data[0]['id']
 
-    insert = supabase.table('accounts').insert({
+    insert = sb.table('accounts').insert({
         'user_id': user_id,
         'bank_name': bank_name,
         'account_type': 'credit',
@@ -56,12 +54,11 @@ def _get_or_create_account(supabase, user_id: str, bank_name: str) -> str:
     return insert.data[0]['id']
 
 
-def _deduplicate(supabase, account_id: str, transactions: list) -> list:
-    """Remove transactions already in the DB (match on account_id + date + description + amount)."""
+def _deduplicate(sb, account_id: str, transactions: list) -> list:
     if not transactions:
         return []
 
-    existing = supabase.table('transactions') \
+    existing = sb.table('transactions') \
         .select('date, description, amount') \
         .eq('account_id', account_id) \
         .execute()
@@ -77,84 +74,72 @@ def _deduplicate(supabase, account_id: str, transactions: list) -> list:
     ]
 
 
-class handler(BaseHTTPRequestHandler):
+def _json(status: int, body: dict):
+    return {
+        'statusCode': status,
+        'headers': {'Content-Type': 'application/json'},
+        'body': json.dumps(body),
+    }
 
-    def do_POST(self):
-        content_type = self.headers.get('Content-Type', '')
 
-        if 'multipart/form-data' not in content_type:
-            self._respond(400, {'error': 'Expected multipart/form-data'})
-            return
+def handler(request):
+    if request.method != 'POST':
+        return _json(405, {'error': 'Method not allowed'})
 
-        # Parse multipart body
-        environ = {
-            'REQUEST_METHOD': 'POST',
-            'CONTENT_TYPE': content_type,
-            'CONTENT_LENGTH': self.headers.get('Content-Length', '0'),
-        }
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ=environ,
-        )
+    content_type = request.headers.get('content-type', '')
+    if 'multipart/form-data' not in content_type:
+        return _json(400, {'error': 'Expected multipart/form-data'})
 
-        pdf_field = form.get('file')
-        if pdf_field is None or not hasattr(pdf_field, 'file'):
-            self._respond(400, {'error': 'No file field in request'})
-            return
+    form = request.form
+    files = request.files
 
-        user_id = form.getvalue('user_id')
-        if not user_id:
-            self._respond(400, {'error': 'user_id is required'})
-            return
+    pdf_file = files.get('file')
+    if pdf_file is None:
+        return _json(400, {'error': 'No file field in request'})
 
-        # Save PDF to temp file
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-            tmp.write(pdf_field.file.read())
-            tmp_path = tmp.name
+    user_id = form.get('user_id')
+    if not user_id:
+        return _json(400, {'error': 'user_id is required'})
 
-        try:
-            parser = _detect_parser(tmp_path)
-            if parser is None:
-                self._respond(422, {'error': 'Unsupported bank statement format'})
-                return
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+        pdf_file.save(tmp)
+        tmp_path = tmp.name
 
-            transactions = parser.parse(tmp_path)
+    try:
+        parser = _detect_parser(tmp_path)
+        if parser is None:
+            return _json(422, {'error': 'Unsupported bank statement format'})
 
-            supabase = _get_supabase()
-            account_id = _get_or_create_account(supabase, user_id, 'Public Bank')
-            new_txs = _deduplicate(supabase, account_id, transactions)
+        transactions = parser.parse(tmp_path)
 
-            if new_txs:
-                rows = [
-                    {
-                        'account_id': account_id,
-                        'date': str(t.date),
-                        'description': t.description,
-                        'amount': t.amount,
-                        'type': t.type,
-                        'category': t.category,
-                        'source': 'pdf',
-                        'raw_text': t.raw_text,
-                    }
-                    for t in new_txs
-                ]
-                supabase.table('transactions').insert(rows).execute()
+        sb = _get_supabase()
+        account_id = _get_or_create_account(sb, user_id, 'Public Bank')
+        new_txs = _deduplicate(sb, account_id, transactions)
 
-            self._respond(200, {
-                'inserted': len(new_txs),
-                'duplicates_skipped': len(transactions) - len(new_txs),
-                'total_parsed': len(transactions),
-            })
+        if new_txs:
+            rows = [
+                {
+                    'account_id': account_id,
+                    'date': str(t.date),
+                    'description': t.description,
+                    'amount': t.amount,
+                    'type': t.type,
+                    'category': t.category,
+                    'source': 'pdf',
+                    'raw_text': t.raw_text,
+                }
+                for t in new_txs
+            ]
+            sb.table('transactions').insert(rows).execute()
 
-        except Exception as e:
-            self._respond(500, {'error': str(e)})
+        return _json(200, {
+            'inserted': len(new_txs),
+            'duplicates_skipped': len(transactions) - len(new_txs),
+            'total_parsed': len(transactions),
+        })
 
-        finally:
-            os.unlink(tmp_path)
+    except Exception as e:
+        return _json(500, {'error': str(e)})
 
-    def _respond(self, status: int, body: dict):
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(body).encode())
+    finally:
+        os.unlink(tmp_path)
