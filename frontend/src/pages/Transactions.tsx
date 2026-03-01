@@ -97,7 +97,7 @@ export default function Transactions() {
         throw new Error(json.error ?? `Upload failed (${res.status})`)
       }
 
-      setUploadStatus(json)
+      setUploadStatus(json as UploadResult)
       queryClient.invalidateQueries({ queryKey: ['transactions'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     } catch (err: unknown) {
