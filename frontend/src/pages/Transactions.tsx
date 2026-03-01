@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, X } from 'lucide-react'
+import { Plus, Upload, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import BottomNav from '@/components/BottomNav'
 import TransactionRow from '@/components/TransactionRow'
@@ -36,6 +36,12 @@ function useTransactions() {
   })
 }
 
+interface UploadResult {
+  inserted: number
+  duplicates_skipped: number
+  total_parsed: number
+}
+
 export default function Transactions() {
   const { data, isLoading } = useTransactions()
   const queryClient = useQueryClient()
@@ -48,6 +54,50 @@ export default function Transactions() {
     category: 'others',
   })
   const [error, setError] = useState('')
+  const [uploadStatus, setUploadStatus] = useState<UploadResult | null>(null)
+  const [uploadError, setUploadError] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setIsUploading(true)
+    setUploadError('')
+    setUploadStatus(null)
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token ?? ''
+
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('user_id', user.id)
+
+      const res = await fetch('/api/parse_pdf', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      })
+
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'Upload failed')
+
+      setUploadStatus(json)
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setIsUploading(false)
+      // Reset input so the same file can be re-uploaded if needed
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
 
   const addMutation = useMutation({
     mutationFn: async (tx: NewTransaction) => {
@@ -112,14 +162,62 @@ export default function Transactions() {
         <div className="px-4 py-6 space-y-4">
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-semibold text-zinc-50">Transactions</h1>
-            <motion.button
-              whileTap={{ scale: 0.97 }}
-              onClick={() => setShowForm(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 hover:bg-indigo-500 transition-colors"
-            >
-              <Plus className="h-4 w-4 text-white" />
-            </motion.button>
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={handlePdfUpload}
+              />
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                title="Upload PDF statement"
+              >
+                <Upload className="h-4 w-4 text-zinc-300" />
+              </motion.button>
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => setShowForm(true)}
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 hover:bg-indigo-500 transition-colors"
+              >
+                <Plus className="h-4 w-4 text-white" />
+              </motion.button>
+            </div>
           </div>
+
+          {isUploading && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+              <p className="text-sm text-zinc-400">Parsing PDF...</p>
+            </div>
+          )}
+
+          {uploadStatus && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 flex items-center justify-between">
+              <p className="text-sm text-zinc-50">
+                <span className="text-emerald-400 font-medium tabular-nums">{uploadStatus.inserted}</span>
+                {' '}transactions imported
+                {uploadStatus.duplicates_skipped > 0 && (
+                  <span className="text-zinc-400"> · {uploadStatus.duplicates_skipped} skipped</span>
+                )}
+              </p>
+              <button onClick={() => setUploadStatus(null)}>
+                <X className="h-4 w-4 text-zinc-500" />
+              </button>
+            </div>
+          )}
+
+          {uploadError && (
+            <div className="rounded-lg border border-red-900 bg-zinc-900 px-4 py-3 flex items-center justify-between">
+              <p className="text-sm text-red-400">{uploadError}</p>
+              <button onClick={() => setUploadError('')}>
+                <X className="h-4 w-4 text-zinc-500" />
+              </button>
+            </div>
+          )}
 
           {showForm && (
             <form
@@ -215,9 +313,9 @@ export default function Transactions() {
             </div>
           ) : data?.length === 0 ? (
             <EmptyState
-              message="No transactions yet — add your first one"
-              actionLabel="Add Transaction"
-              onAction={() => setShowForm(true)}
+              message="No transactions yet — add manually or upload a PDF statement"
+              actionLabel="Upload PDF"
+              onAction={() => fileInputRef.current?.click()}
             />
           ) : (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4">
